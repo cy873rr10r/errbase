@@ -2,93 +2,100 @@
 
 ### Your terminal remembers how you fixed it last time.
 
-You've hit `permission denied on /run/user/1000/hyprland-0` before. You fixed it.
-Three weeks later it happens again — and you're back on Google, re-finding the
-same answer.
+You hit an error. You fix it. Three weeks later it happens again — and you're
+back on Google re-finding the same answer.
 
-**errbase ends that.** When a command fails, it shows you the fix that worked
+**errbase ends that.** When an error shows up, it gives you the fix that worked
 *last time* — pulled from a knowledge graph, not a flat history file.
 
 ---
 
-## Why it's different from `Ctrl-R` history or RAG
-
-Normal tools match **text**. errbase matches **meaning + relationships**.
-
-It's built on [**Cognee**](https://github.com/topoteretes/cognee), which stores
-each error as nodes in a graph — the error class, the socket path, your OS, and
-the exact fix — all linked. So a *slightly different* error message still finds
-the right fix, because the graph knows it's the **same error class**.
-
-> Cognee reports **92.5%** retrieval accuracy on graph-structured memory vs
-> ~60% for flat-chunk RAG. errbase applies that same graph structure to your
-> shell errors.
-
-**It gets smarter the more you use it.** Confirm a fix and errbase calls
-Cognee's `improve()` to re-weight it — a fix you've verified 5 times ranks above
-one you tried once.
-
----
-
-## See it in 30 seconds
+## Try it in 10 seconds
 
 ```bash
-pip install "errbase[graph]"        # graph brain (Cognee + Mistral)
-export LLM_API_KEY="your_mistral_key"
-export LLM_PROVIDER="mistral"
-
-errbase seed                        # load 50 common Arch/Nix/Docker/git fixes
-errbase recall "permission denied on hyprland-0 socket"
+python -m errbase demo
 ```
 
-```
-╭─ errbase · your graph  ✓ confirmed 3× ──────────────────────────╮
-│  You fixed this before:                                         │
-│    $ rm -f /run/user/$(id -u)/hyprland-*.lock && systemctl ...  │
-╰─────────────────────────────────────────────────────────────────╯
-```
+That one command does everything: loads a starter graph, looks up a real fix,
+shows *why* that fix was chosen, draws the whole memory graph, and prints stats.
+No setup, no API key needed.
 
 ---
 
-## Auto-mode: it learns while you work
+## How it works (3 steps)
 
-Add the shell plugin and errbase captures failures silently:
-
-```bash
-# zinit
-zinit load yourgithub/errbase
-# or manual
-source ~/errbase/errbase.plugin.zsh
+```
+   you teach it a fix          you ask about an error        you confirm it worked
+   ──────────────────  ──►   ─────────────────────────  ──►  ─────────────────────
+   errbase fix ...            errbase recall "..."            errbase confirm ...
+   stored in the graph        matched by *meaning*, not       fix ranks higher
+                              exact text                       next time
 ```
 
-Now when a command fails and your **next** command fixes it, errbase asks
-**once** if it should remember. That's it — your error graph builds itself.
+1. **Store** — every error is saved as a small graph: *error → class → system → fix*.
+2. **Recall** — a *similar* error still finds the right fix, because the graph
+   matches the **error class**, not the exact words.
+3. **Reinforce** — confirm a fix and it ranks higher. The graph gets smarter the
+   more you use it.
 
-**Privacy:** everything is local-first. errbase **never** stores or runs a fix
-without your `y`. Your secrets never leave your machine.
-
----
-
-## The 10x angle: a shared error graph
-
-Every Arch / NixOS / CachyOS user hits the same 50 errors. Today everyone
-solves them alone. errbase turns one person's fix into **everyone's** fix — a
-community knowledge graph that ships as a one-line plugin install.
-
-One install. Every error someone already solved, solved for you too.
+You don't need an error to happen to use it — just type the error text and ask.
 
 ---
 
 ## Commands
 
-| command | does |
+| command | what it does |
 |---|---|
+| `errbase demo` | run the whole flow end-to-end (start here) |
 | `errbase recall "<error>"` | look up the fix you used last time |
+| `errbase why "<error>"` | show the graph chain behind a fix |
+| `errbase graph` | see the whole memory graph |
 | `errbase fix "<error>" "<cmd>"` | teach it a fix |
 | `errbase confirm "<error>" "<cmd>"` | mark a fix as worked (reinforces it) |
-| `errbase stats` | what errbase has learned |
 | `errbase seed` | load the starter community graph |
+| `errbase stats` | what errbase has learned |
+| `errbase doctor` | check the Cognee connection |
 | `errbase forget --all` | wipe memory |
+
+---
+
+## Turning on the graph brain (optional)
+
+errbase works out of the box on a **local cache**. To switch on the real graph
+memory ([Cognee](https://github.com/topoteretes/cognee) + Mistral), add a key.
+
+Easiest — **Cognee Cloud**. Put your key in a `.env` file next to the project:
+
+```
+COGNEE_API_KEY="your_key_from_platform.cognee.ai"
+```
+
+errbase loads `.env` automatically — no exporting needed. Then:
+
+```bash
+errbase doctor    # verifies the live connection
+errbase seed      # first real write to the cloud graph
+errbase demo
+```
+
+> Prefer self-hosting? Set `LLM_API_KEY` + `LLM_PROVIDER=mistral` instead.
+> See `.env.example` for all options.
+
+---
+
+## Auto-capture (optional)
+
+Add the shell plugin and errbase learns silently while you work:
+
+```bash
+source ~/errbase/errbase.plugin.zsh
+```
+
+When a command fails and your **next** command fixes it, errbase asks **once**
+if it should remember. Your error graph builds itself.
+
+**Privacy:** everything is local-first. errbase never stores or runs a fix
+without your `y`. Your secrets never leave your machine.
 
 ---
 
