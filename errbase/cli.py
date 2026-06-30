@@ -21,8 +21,48 @@ Privacy: nothing is stored or run without your confirmation. errbase never
 auto-executes a fix — it shows it and waits for you to press y.
 """
 
+import os
 import sys
 import platform
+from pathlib import Path
+
+# Windows consoles default to cp1252 and choke on the box-drawing / ● ✓ glyphs
+# (especially when output is piped). Force UTF-8 so errbase renders everywhere.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_dotenv():
+    """Load a .env file into os.environ (zero-dependency, no overrides).
+
+    Looks next to the package and up the cwd tree so `COGNEE_API_KEY` etc.
+    persist across sessions without exporting them by hand. Runs BEFORE the
+    cognee brain is imported, since the brain reads these keys at import time.
+    """
+    candidates = [Path.cwd() / ".env", Path(__file__).resolve().parent.parent / ".env"]
+    for env_path in candidates:
+        if not env_path.is_file():
+            continue
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:  # real env vars win
+                    os.environ[key] = val
+        except Exception:
+            pass
+        break  # first .env found wins
+
+
+_load_dotenv()
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -38,6 +78,34 @@ console = Console()
 ACCENT = "#7c5cff"
 OK = "#2ecf6b"
 WARN = "#ffb454"
+MUTED = "#8a8597"
+
+# Animations only when we're on a real terminal (never when piped/redirected,
+# so logs and `| head` stay instant). Disable with ERRBASE_NO_ANIM=1.
+import time
+
+ANIMATE = sys.stdout.isatty() and os.environ.get("ERRBASE_NO_ANIM") != "1"
+
+
+def _pause(seconds: float = 0.35):
+    if ANIMATE:
+        time.sleep(seconds)
+
+
+def _reveal(lines, delay: float = 0.05, style: str = ""):
+    """Print lines one-by-one for a light typed-in reveal."""
+    for ln in lines:
+        console.print(ln, style=style) if style else console.print(ln)
+        if ANIMATE:
+            time.sleep(delay)
+
+
+def _thinking(label: str, seconds: float = 0.8):
+    """Brief spinner so steps feel like the graph is being traversed."""
+    if not ANIMATE:
+        return
+    with console.status(f"[{ACCENT}]{label}[/{ACCENT}]", spinner="dots"):
+        time.sleep(seconds)
 
 
 def _system() -> str:
@@ -50,17 +118,29 @@ def _system() -> str:
 # ----------------------------------------------------------------------------
 # Pretty bits
 # ----------------------------------------------------------------------------
-LOGO = r"""[bold #7c5cff] ___ ___ ___ ___  ___ ___ ___ 
+# Plain ASCII art (no markup) — safe to split line-by-line for the reveal.
+LOGO_ART = r""" ___ ___ ___ ___  ___ ___ ___
 | -_|  _|  _| . || .'|_ -| -_|
-|___|_| |_| |___||__,|___|___|[/bold #7c5cff]"""
+|___|_| |_| |___||__,|___|___|"""
+
+LOGO = f"[bold {ACCENT}]{LOGO_ART}[/bold {ACCENT}]"
 
 
-def banner():
-    from rich.align import Align
+def banner(animate: bool = True):
     from rich.console import Group
     s = brain.stats()
     live = brain.cognee_available()
     dot = f"[{OK}]●[/{OK}]" if live else f"[{WARN}]●[/{WARN}]"
+
+    # Light reveal: pulse the logo lines in before the panel settles.
+    if animate and ANIMATE:
+        for ln in LOGO_ART.split("\n"):
+            console.print(Text(ln, style=f"bold {ACCENT}"), justify="left")
+            time.sleep(0.07)
+        console.print()
+        time.sleep(0.12)
+        console.clear()
+
     head = Group(
         Text.from_markup(LOGO),
         Text.from_markup(
@@ -108,6 +188,7 @@ def show_help():
     t.add_column("command", style=f"bold {ACCENT}", no_wrap=True)
     t.add_column("what it does")
     rows = [
+        ("errbase demo", "Run the whole flow end-to-end (seed → recall → graph)"),
         ("errbase recall \"<error>\"", "Look up the fix you used last time"),
         ("errbase why \"<error>\"", "Show the graph chain behind a fix"),
         ("errbase graph", "See the whole memory graph at once"),
@@ -165,6 +246,10 @@ def show_why(error_text: str):
     )
 
 
+def _heat(conf: int) -> str:
+    return OK if conf >= 3 else (WARN if conf >= 1 else MUTED)
+
+
 def show_graph():
     """Wide shot: the whole memory grouped by error class → systems → fixes."""
     from rich.tree import Tree
@@ -180,31 +265,45 @@ def show_graph():
         cls = _class_of(c["error"])
         classes.setdefault(cls, []).append(c)
 
+    # pad system tags to a common width so the error column lines up cleanly
+    sys_w = min(max((len(c.get("system", "Linux")) for c in cards), default=5), 8)
+
     total_fix = sum(len(c["fixes"]) for c in cards)
     total_conf = sum(f["confirms"] for c in cards for f in c["fixes"])
     root = Tree(
-        f"[bold {ACCENT}]⬡ errbase graph[/bold {ACCENT}]  "
+        f"[bold {ACCENT}]⬡ errbase graph[/bold {ACCENT}]\n"
         f"[dim]{len(cards)} errors · {len(classes)} classes · "
-        f"{total_fix} fixes · {total_conf} confirmations[/dim]"
+        f"{total_fix} fixes · {total_conf} confirmations[/dim]",
+        guide_style=MUTED,
     )
+
+    if ANIMATE:
+        console.print()  # tidy spacing before the live build
+
     for cls, items in sorted(classes.items(), key=lambda kv: -len(kv[1])):
-        cnode = root.add(f"[bold {ACCENT}]◆ {cls}[/bold {ACCENT}]  [dim]({len(items)})[/dim]")
-        for c in items:
+        cnode = root.add(
+            f"[bold {ACCENT}]◆ {cls}[/bold {ACCENT}] [dim]· {len(items)}[/dim]"
+        )
+        for c in sorted(items, key=lambda c: -c["fixes"][0]["confirms"]):
             best = c["fixes"][0]
             conf = best["confirms"]
-            heat = OK if conf >= 3 else (WARN if conf >= 1 else "dim")
+            heat = _heat(conf)
+            tag = f"{c.get('system','Linux'):<{sys_w}}"
             enode = cnode.add(
-                f"[{heat}]●[/{heat}] [dim]{c.get('system','Linux')}[/dim]  "
-                f"{c['error'][:46]}"
+                f"[{heat}]●[/{heat}] [bold dim]{tag}[/bold dim]  "
+                f"[default]{c['error'][:50]}[/default]"
             )
-            enode.add(f"[{OK}]✓[/{OK}] $ {best['command'][:52]}  "
-                      f"[dim]({conf}×)[/dim]")
+            badge = f"[{heat}]{conf}×[/{heat}]" if conf else "[dim]new[/dim]"
+            enode.add(
+                f"[{OK}]✓[/{OK}] [dim]$[/dim] {best['command'][:58]}  {badge}"
+            )
 
     console.print(Panel(root, title="errbase · full memory graph", title_align="left",
                         border_style=ACCENT, box=box.ROUNDED, padding=(1, 2)))
     console.print(
-        f"[dim]● [/dim][{OK}]green[/{OK}][dim] = battle-tested (3×+)   [/dim]"
-        f"[{WARN}]amber[/{WARN}][dim] = used once   dim = unconfirmed[/dim]\n"
+        f"  [{OK}]●[/{OK}] [dim]battle-tested 3×+[/dim]   "
+        f"[{WARN}]●[/{WARN}] [dim]used once[/dim]   "
+        f"[{MUTED}]●[/{MUTED}] [dim]unconfirmed[/dim]\n"
     )
 
 
@@ -410,6 +509,56 @@ def cmd_forget():
         console.print("[dim]forgotten.[/dim]")
 
 
+def cmd_demo():
+    """One command that runs the whole flow end-to-end — no manual steps.
+
+    seed (if empty) → recall a real fix → why → full graph → stats.
+    """
+    banner()
+    _pause(0.3)
+
+    # 1. make sure the graph has something to show
+    if brain.stats()["errors_known"] == 0:
+        console.print(f"[bold {ACCENT}]▸ step 1 · seeding the community error graph[/bold {ACCENT}]")
+        cmd_seed()
+    else:
+        console.print(f"[dim]▸ step 1 · graph already populated — skipping seed[/dim]")
+    console.print()
+    _pause()
+
+    # pick a real seeded error to walk through
+    sample = SEED_CARDS[0]["error"]
+
+    # 2. recall the fix (non-interactive so it runs unattended)
+    console.print(f"[bold {ACCENT}]▸ step 2 · recall[/bold {ACCENT}]  [dim]errbase recall \"{sample[:48]}...\"[/dim]")
+    _thinking("searching the graph by error class…", 0.9)
+    cmd_recall(sample, interactive=False)
+    console.print()
+    _pause()
+
+    # 3. why this fix — the graph reasoning chain
+    console.print(f"[bold {ACCENT}]▸ step 3 · why[/bold {ACCENT}]  [dim]the graph chain behind that fix[/dim]")
+    _thinking("traversing error → class → system → fix…", 0.9)
+    show_why(sample)
+    console.print()
+    _pause()
+
+    # 4. the whole graph
+    console.print(f"[bold {ACCENT}]▸ step 4 · graph[/bold {ACCENT}]  [dim]the full memory at a glance[/dim]")
+    _thinking("laying out the memory graph…", 0.7)
+    show_graph()
+    console.print()
+    _pause()
+
+    # 5. summary
+    console.print(f"[bold {ACCENT}]▸ step 5 · stats[/bold {ACCENT}]")
+    cmd_stats()
+    console.print(
+        f"\n[{OK}]✓ demo complete.[/{OK}] [dim]try it live →[/dim] "
+        f"[bold {ACCENT}]errbase recall \"<your error>\"[/bold {ACCENT}]\n"
+    )
+
+
 # ----------------------------------------------------------------------------
 # Arg routing (no argparse — keep it tiny and predictable)
 # ----------------------------------------------------------------------------
@@ -449,6 +598,8 @@ def main(argv=None):
             cmd_stats()
         elif cmd == "seed":
             cmd_seed()
+        elif cmd == "demo":
+            cmd_demo()
         elif cmd == "forget":
             cmd_forget()
         else:
