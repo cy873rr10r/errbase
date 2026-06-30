@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""
+errbase — your terminal remembers how you fixed it last time.
+
+Powered by Cognee (graph memory) + Mistral. Captures failed commands, stores
+the fix that worked in a knowledge graph, and surfaces it the next time the
+same error class appears — even on a fresh machine, via the shared error graph.
+
+Usage:
+    errbase help                       Show this help
+    errbase recall "<error text>"      Look up a known fix for an error
+    errbase capture <code> "<cmd>" "<stderr>"
+                                       (called by the shell hook on failure)
+    errbase fix "<error>" "<fix cmd>"  Manually teach errbase a fix
+    errbase confirm "<error>" "<fix>"  Mark a fix as worked (reinforces it)
+    errbase stats                      Show what errbase has learned
+    errbase seed                       Load the starter community error graph
+    errbase forget --all               Wipe all memory
+
+Privacy: nothing is stored or run without your confirmation. errbase never
+auto-executes a fix — it shows it and waits for you to press y.
+"""
+
+import sys
+import platform
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich.prompt import Confirm
+from rich import box
+
+from . import cognee_brain as brain
+from .seed import SEED_CARDS
+
+console = Console()
+
+ACCENT = "#7c5cff"
+OK = "#2ecf6b"
+WARN = "#ffb454"
+
+
+def _system() -> str:
+    try:
+        return f"{platform.system()} ({platform.release().split('-')[0]})"
+    except Exception:
+        return "Linux"
+
+
+# ----------------------------------------------------------------------------
+# Pretty bits
+# ----------------------------------------------------------------------------
+LOGO = r"""[bold #7c5cff] ___ ___ ___ ___  ___ ___ ___ 
+| -_|  _|  _| . || .'|_ -| -_|
+|___|_| |_| |___||__,|___|___|[/bold #7c5cff]"""
+
+
+def banner():
+    from rich.align import Align
+    from rich.console import Group
+    s = brain.stats()
+    live = brain.cognee_available()
+    dot = f"[{OK}]●[/{OK}]" if live else f"[{WARN}]●[/{WARN}]"
+    head = Group(
+        Text.from_markup(LOGO),
+        Text.from_markup(
+            "\n[bold]your terminal remembers how you fixed it last time[/bold]\n"
+            f"[dim]graph memory · Cognee + Mistral[/dim]   {dot} [dim]{s['backend']}[/dim]"
+        ),
+    )
+    console.print(
+        Panel(head, border_style=ACCENT, box=box.HEAVY, padding=(1, 3))
+    )
+
+
+def welcome():
+    """First-run onboarding — shown when errbase has no memory yet."""
+    banner()
+    console.print(
+        Panel(
+            Text.from_markup(
+                "[bold]What it does[/bold]\n"
+                "When a command fails, errbase shows the fix that worked [italic]last "
+                "time[/italic] — pulled from a knowledge [bold]graph[/bold], not flat "
+                "history. Same error class, different wording — still finds it.\n\n"
+                "[bold]It learns by use.[/bold] Confirm a fix and it ranks higher next "
+                "time. The graph gets smarter the more you work."
+            ),
+            border_style=ACCENT, box=box.ROUNDED, padding=(1, 2),
+            title="welcome", title_align="left",
+        )
+    )
+    # 3-step quick start
+    steps = Table.grid(padding=(0, 2))
+    steps.add_column(style=f"bold {ACCENT}", justify="right")
+    steps.add_column()
+    steps.add_row("1", "[bold]errbase seed[/bold]   [dim]load 50 common Arch/Nix/Docker/git fixes[/dim]")
+    steps.add_row("2", "[bold]errbase recall \"permission denied hyprland-0\"[/bold]   [dim]try it[/dim]")
+    steps.add_row("3", "[bold]source errbase.plugin.zsh[/bold]   [dim]auto-capture while you work[/dim]")
+    console.print(Panel(steps, title="get started in 30 seconds",
+                        title_align="left", border_style=OK, box=box.ROUNDED, padding=(1, 2)))
+    console.print(f"[dim]full command list →[/dim] [bold {ACCENT}]errbase help[/bold {ACCENT}]\n")
+
+
+def show_help():
+    banner()
+    t = Table(box=box.SIMPLE_HEAD, show_edge=False, pad_edge=False, padding=(0, 2))
+    t.add_column("command", style=f"bold {ACCENT}", no_wrap=True)
+    t.add_column("what it does")
+    rows = [
+        ("errbase recall \"<error>\"", "Look up the fix you used last time"),
+        ("errbase why \"<error>\"", "Show the graph chain behind a fix"),
+        ("errbase graph", "See the whole memory graph at once"),
+        ("errbase fix \"<error>\" \"<cmd>\"", "Teach errbase a fix manually"),
+        ("errbase confirm \"<error>\" \"<cmd>\"", "Mark a fix as worked → reinforces it"),
+        ("errbase stats", "See what errbase has learned"),
+        ("errbase doctor", "Verify the live Cognee integration"),
+        ("errbase seed", "Load the starter community graph"),
+        ("errbase forget --all", "Wipe all memory"),
+    ]
+    for c, d in rows:
+        t.add_row(c, d)
+    console.print(t)
+    console.print(
+        Panel(
+            "[bold]Auto-capture[/bold] (optional): add the shell hook so errbase learns "
+            "silently.\nWhen a command fails, errbase asks "
+            "[bold]once[/bold] before storing — your secrets never leave your machine "
+            "without a [bold]y[/bold].",
+            border_style="dim", box=box.ROUNDED,
+            title="how it learns", title_align="left",
+        )
+    )
+
+
+def show_why(error_text: str):
+    """Render the graph chain: error → class → system → fix → confirmations."""
+    from rich.tree import Tree
+    card = brain.get_card(error_text)
+    if not card:
+        console.print(
+            Panel(f"[dim]No graph entry for:[/dim] [bold]{error_text.strip()[:90]}[/bold]",
+                  border_style=WARN, box=box.ROUNDED, title="errbase · why")
+        )
+        return
+
+    best = card["fixes"][0]
+    tree = Tree(f"[bold {WARN}]✕ error[/bold {WARN}]  {card['error'][:70]}")
+    cls = tree.add(f"[{ACCENT}]◆ error class[/{ACCENT}]  [dim]{_class_of(card['error'])}[/dim]")
+    sysn = cls.add(f"[{ACCENT}]▣ system[/{ACCENT}]  [dim]{card.get('system','Linux')}[/dim]")
+    fixn = sysn.add(f"[bold {OK}]✓ fix[/bold {OK}]  $ {best['command']}")
+    fixn.add(f"[dim]confirmed[/dim] [{OK}]{best['confirms']}×[/{OK}] [dim]— ranks above "
+             f"{len(card['fixes'])-1} other fix(es)[/dim]")
+    for other in card["fixes"][1:3]:
+        sysn.add(f"[dim]✓ alt fix  $ {other['command']}  ({other['confirms']}×)[/dim]")
+
+    console.print(
+        Panel(tree, title="errbase · why this fix",
+              title_align="left", border_style=ACCENT, box=box.ROUNDED, padding=(1, 2))
+    )
+    console.print(
+        f"[dim]This is a graph traversal, not a text match — the same [/dim]"
+        f"[bold]error class[/bold][dim] links every variant of this error to the "
+        f"fix that worked.[/dim]\n"
+    )
+
+
+def show_graph():
+    """Wide shot: the whole memory grouped by error class → systems → fixes."""
+    from rich.tree import Tree
+    cards = brain.all_cards()
+    if not cards:
+        console.print(Panel("[dim]graph is empty — run [bold]errbase seed[/bold] first.[/dim]",
+                            border_style=WARN, box=box.ROUNDED, title="errbase · graph"))
+        return
+
+    # group cards by error class
+    classes = {}
+    for c in cards:
+        cls = _class_of(c["error"])
+        classes.setdefault(cls, []).append(c)
+
+    total_fix = sum(len(c["fixes"]) for c in cards)
+    total_conf = sum(f["confirms"] for c in cards for f in c["fixes"])
+    root = Tree(
+        f"[bold {ACCENT}]⬡ errbase graph[/bold {ACCENT}]  "
+        f"[dim]{len(cards)} errors · {len(classes)} classes · "
+        f"{total_fix} fixes · {total_conf} confirmations[/dim]"
+    )
+    for cls, items in sorted(classes.items(), key=lambda kv: -len(kv[1])):
+        cnode = root.add(f"[bold {ACCENT}]◆ {cls}[/bold {ACCENT}]  [dim]({len(items)})[/dim]")
+        for c in items:
+            best = c["fixes"][0]
+            conf = best["confirms"]
+            heat = OK if conf >= 3 else (WARN if conf >= 1 else "dim")
+            enode = cnode.add(
+                f"[{heat}]●[/{heat}] [dim]{c.get('system','Linux')}[/dim]  "
+                f"{c['error'][:46]}"
+            )
+            enode.add(f"[{OK}]✓[/{OK}] $ {best['command'][:52]}  "
+                      f"[dim]({conf}×)[/dim]")
+
+    console.print(Panel(root, title="errbase · full memory graph", title_align="left",
+                        border_style=ACCENT, box=box.ROUNDED, padding=(1, 2)))
+    console.print(
+        f"[dim]● [/dim][{OK}]green[/{OK}][dim] = battle-tested (3×+)   [/dim]"
+        f"[{WARN}]amber[/{WARN}][dim] = used once   dim = unconfirmed[/dim]\n"
+    )
+
+
+
+def _class_of(error_text: str) -> str:
+    """Cheap error-class label for the why-view (graph node name)."""
+    t = error_text.lower()
+    for key, label in (
+        ("permission denied", "permission / socket access"),
+        ("transaction", "package transaction conflict"),
+        ("keyring", "package signature / keyring"),
+        ("docker daemon", "docker daemon unreachable"),
+        ("port", "port already in use"),
+        ("externally-managed", "python env policy"),
+        ("authentication", "git auth"),
+        ("nvidia", "gpu driver"),
+        ("wayland", "wayland display"),
+        ("nix", "nix build / config"),
+    ):
+        if key in t:
+            return label
+    return "general error"
+
+
+def show_fix(result: dict, error_text: str):
+    if not result:
+        console.print(
+            Panel(
+                f"[dim]No known fix yet for:[/dim]\n[bold]{error_text.strip()[:120]}[/bold]\n\n"
+                f"When you solve it, run:\n  [bold {ACCENT}]errbase fix \"{error_text.strip()[:40]}...\" "
+                f"\"<your fix command>\"[/bold {ACCENT}]",
+                title="errbase · no memory",
+                border_style=WARN,
+                box=box.ROUNDED,
+            )
+        )
+        return
+
+    src_label = {
+        "local-cache": "graph cache",
+        "cognee-graph": "Cognee graph (live)",
+        "cognee-cloud": "Cognee Cloud (live)",
+    }.get(result["source"], result["source"])
+
+    confirms = result.get("confirms", 0)
+    badge = f"[{OK}]✓ confirmed {confirms}×[/{OK}]" if confirms else "[dim]unverified[/dim]"
+
+    body = Text()
+    body.append("You fixed this before:\n\n", style="dim")
+    body.append(f"  $ {result['fix']}\n", style=f"bold {OK}")
+    if result.get("others"):
+        body.append("\nother fixes that worked:\n", style="dim")
+        for o in result["others"][:3]:
+            body.append(f"  · {o}\n", style="dim")
+
+    console.print(
+        Panel(
+            body,
+            title=f"errbase · {src_label}  {badge}",
+            title_align="left",
+            border_style=ACCENT,
+            box=box.ROUNDED,
+            padding=(1, 2),
+        )
+    )
+
+
+# ----------------------------------------------------------------------------
+# Commands
+# ----------------------------------------------------------------------------
+def cmd_recall(error_text: str, interactive: bool = True):
+    result = brain.recall_fix(error_text)
+    show_fix(result, error_text)
+    if result:
+        console.print(f"[dim]why this fix? →[/dim] [bold {ACCENT}]errbase why \"{error_text.strip()[:30]}...\"[/bold {ACCENT}]")
+    if result and interactive:
+        if Confirm.ask(f"[{ACCENT}]Run this fix now?[/{ACCENT}]", default=False):
+            console.print(f"[dim]→ copy/run:[/dim] [bold]{result['fix']}[/bold]")
+            if Confirm.ask(f"[{OK}]Did it work?[/{OK}]", default=True):
+                brain.confirm_fix(error_text, result["fix"], _system())
+                console.print(f"[{OK}]✓ reinforced — this fix will rank higher next time.[/{OK}]")
+    return result
+
+
+def cmd_capture(code: str, command: str, stderr: str):
+    """Called by the shell hook after a non-zero exit."""
+    if not stderr.strip():
+        stderr = command  # match on command if no stderr captured
+    result = brain.recall_fix(stderr)
+    if result:
+        show_fix(result, stderr)
+    # else: stay silent on first sight — don't nag the user
+
+
+def cmd_fix(error_text: str, fix_command: str):
+    if not Confirm.ask(
+        f"[{ACCENT}]Store this fix in your error graph?[/{ACCENT}] "
+        f"[dim](nothing leaves your machine)[/dim]",
+        default=True,
+    ):
+        console.print("[dim]skipped — nothing stored.[/dim]")
+        return
+    brain.store_fix(
+        command="", error_text=error_text, fix_command=fix_command, system=_system()
+    )
+    console.print(f"[{OK}]✓ learned.[/{OK}] errbase will surface this next time.")
+
+
+def cmd_confirm(error_text: str, fix_command: str):
+    brain.confirm_fix(error_text, fix_command, _system())
+    console.print(f"[{OK}]✓ reinforced.[/{OK}]")
+
+
+def cmd_stats():
+    s = brain.stats()
+    t = Table(box=box.ROUNDED, border_style=ACCENT, title="errbase · memory")
+    t.add_column("metric", style="dim")
+    t.add_column("value", style=f"bold {ACCENT}", justify="right")
+    t.add_row("errors known", str(s["errors_known"]))
+    t.add_row("fixes stored", str(s["fixes_stored"]))
+    t.add_row("confirmations", str(s["total_confirmations"]))
+    t.add_row("backend", s["backend"])
+    console.print(t)
+
+
+def cmd_seed():
+    with console.status("[bold]seeding community error graph...[/bold]", spinner="dots"):
+        for card in SEED_CARDS:
+            brain.store_fix(
+                command=card.get("cmd", ""),
+                error_text=card["error"],
+                fix_command=card["fix"],
+                system=card.get("system", "Linux"),
+            )
+    console.print(
+        f"[{OK}]✓ seeded {len(SEED_CARDS)} common fixes[/{OK}] "
+        f"[dim](Arch/Nix/CachyOS/git/docker).[/dim]"
+    )
+
+
+def cmd_doctor():
+    """Verify the Cognee integration end-to-end with a real round-trip."""
+    import os
+    banner()
+    t = Table(box=box.ROUNDED, border_style=ACCENT, title="errbase doctor · integration check")
+    t.add_column("check", style="dim")
+    t.add_column("result")
+
+    cloud_key = os.environ.get("COGNEE_API_KEY")
+    llm_key = os.environ.get("LLM_API_KEY")
+
+    if cloud_key:
+        t.add_row("mode", f"[{OK}]Cognee Cloud[/{OK}]  [dim](simplest)[/dim]")
+        t.add_row("COGNEE_API_KEY", f"[{OK}]✓ set[/{OK}]")
+        t.add_row("endpoint", f"[dim]{os.environ.get('COGNEE_API_URL','https://api.cognee.ai')}[/dim]")
+        console.print(t)
+        ready = True
+    elif llm_key:
+        try:
+            import cognee
+            ver = getattr(cognee, "__version__", "?")
+            t.add_row("mode", "[bold]self-hosted[/bold]")
+            t.add_row("cognee installed", f"[{OK}]✓ v{ver}[/{OK}]")
+            t.add_row("LLM_API_KEY", f"[{OK}]✓ set[/{OK}]")
+            t.add_row("LLM_PROVIDER", f"[dim]{os.environ.get('LLM_PROVIDER','(unset)')}[/dim]")
+            console.print(t)
+            ready = True
+        except Exception as e:
+            t.add_row("cognee installed", f"[red]✗ {e}[/red]")
+            console.print(t)
+            ready = False
+    else:
+        t.add_row("mode", f"[{WARN}]local cache only[/{WARN}]")
+        console.print(t)
+        console.print(Panel(
+            "[bold]Turn on Cognee — pick one:[/bold]\n\n"
+            f"[bold {OK}]Simplest (Cognee Cloud):[/bold {OK}]\n"
+            "  [bold]export COGNEE_API_KEY=...[/bold]  [dim](from platform.cognee.ai)[/dim]\n\n"
+            "[bold]Self-hosted (your Mistral key):[/bold]\n"
+            "  [bold]export LLM_API_KEY=...  LLM_PROVIDER=mistral[/bold]\n\n"
+            "[dim]errbase works on the local cache until then.[/dim]",
+            border_style=WARN, box=box.ROUNDED, title="action needed", title_align="left"))
+        return
+
+    if not ready:
+        return
+
+    with console.status("[bold]running real remember → recall against Cognee...[/bold]", spinner="dots"):
+        ok, detail = brain.selftest()
+    if ok:
+        console.print(Panel(
+            f"[bold {OK}]✓ Cognee integration LIVE.[/bold {OK}]\n{detail}",
+            border_style=OK, box=box.ROUNDED, title="ready", title_align="left"))
+    else:
+        console.print(Panel(
+            f"[red]✗ round-trip failed:[/red]\n{detail}",
+            border_style="red", box=box.ROUNDED, title="integration error", title_align="left"))
+
+
+def cmd_forget():
+    if Confirm.ask("[red]Wipe ALL errbase memory?[/red]", default=False):
+        brain.forget_all()
+        console.print("[dim]forgotten.[/dim]")
+
+
+# ----------------------------------------------------------------------------
+# Arg routing (no argparse — keep it tiny and predictable)
+# ----------------------------------------------------------------------------
+def main(argv=None):
+    argv = argv if argv is not None else sys.argv[1:]
+
+    # Bare `errbase` → onboarding on first run, help once they've used it.
+    if not argv:
+        if brain.is_first_run():
+            welcome()
+        else:
+            show_help()
+        return
+    if argv[0] in ("help", "-h", "--help"):
+        show_help()
+        return
+
+    cmd = argv[0]
+    rest = argv[1:]
+
+    try:
+        if cmd == "recall" and rest:
+            cmd_recall(" ".join(rest))
+        elif cmd == "why" and rest:
+            show_why(" ".join(rest))
+        elif cmd == "graph":
+            show_graph()
+        elif cmd == "doctor":
+            cmd_doctor()
+        elif cmd == "capture" and len(rest) >= 3:
+            cmd_capture(rest[0], rest[1], rest[2])
+        elif cmd == "fix" and len(rest) >= 2:
+            cmd_fix(rest[0], rest[1])
+        elif cmd == "confirm" and len(rest) >= 2:
+            cmd_confirm(rest[0], rest[1])
+        elif cmd == "stats":
+            cmd_stats()
+        elif cmd == "seed":
+            cmd_seed()
+        elif cmd == "forget":
+            cmd_forget()
+        else:
+            console.print(f"[{WARN}]unknown or incomplete command.[/{WARN}] try [bold]errbase help[/bold]")
+    except KeyboardInterrupt:
+        console.print("\n[dim]cancelled.[/dim]")
+
+
+if __name__ == "__main__":
+    main()
