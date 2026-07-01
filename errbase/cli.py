@@ -129,8 +129,8 @@ LOGO = f"[bold {ACCENT}]{LOGO_ART}[/bold {ACCENT}]"
 def banner(animate: bool = True):
     from rich.console import Group
     s = brain.stats()
-    live = brain.cognee_available()
-    dot = f"[{OK}]●[/{OK}]" if live else f"[{WARN}]●[/{WARN}]"
+    verified = brain.cloud_verified()
+    dot = f"[{OK}]●[/{OK}]" if verified else f"[{WARN}]●[/{WARN}]"
 
     # Light reveal: pulse the logo lines in before the panel settles.
     if animate and ANIMATE:
@@ -145,7 +145,7 @@ def banner(animate: bool = True):
         Text.from_markup(LOGO),
         Text.from_markup(
             "\n[bold]your terminal remembers how you fixed it last time[/bold]\n"
-            f"[dim]graph memory · Cognee + Mistral[/dim]   {dot} [dim]{s['backend']}[/dim]"
+            f"[dim]graph memory · Cognee[/dim]   {dot} [dim]{s['backend']}[/dim]"
         ),
     )
     console.print(
@@ -479,11 +479,10 @@ def cmd_doctor():
         t.add_row("mode", f"[{WARN}]local cache only[/{WARN}]")
         console.print(t)
         console.print(Panel(
-            "[bold]Turn on Cognee — pick one:[/bold]\n\n"
-            f"[bold {OK}]Simplest (Cognee Cloud):[/bold {OK}]\n"
-            "  [bold]export COGNEE_API_KEY=...[/bold]  [dim](from platform.cognee.ai)[/dim]\n\n"
-            "[bold]Self-hosted (your Mistral key):[/bold]\n"
-            "  [bold]export LLM_API_KEY=...  LLM_PROVIDER=mistral[/bold]\n\n"
+            "[bold]Turn on the Cognee graph:[/bold]\n\n"
+            f"[bold {OK}]Add your Cognee Cloud key:[/bold {OK}]\n"
+            "  Put [bold]COGNEE_API_KEY=...[/bold] in a [bold].env[/bold] file "
+            "[dim](get it from platform.cognee.ai)[/dim]\n\n"
             "[dim]errbase works on the local cache until then.[/dim]",
             border_style=WARN, box=box.ROUNDED, title="action needed", title_align="left"))
         return

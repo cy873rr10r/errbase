@@ -60,14 +60,56 @@ if not _CLOUD_OK and os.environ.get("LLM_API_KEY"):
 
 
 def cognee_available() -> bool:
+    """A cloud key / self-hosted lib is configured (we'll attempt to use it)."""
     return _CLOUD_OK or _COGNEE_OK
+
+
+# ── Honest health cache ────────────────────────────────────────────────────
+# A key being *set* doesn't mean the cloud is reachable. We only claim the
+# backend is live after a real round-trip (errbase doctor) succeeds. That
+# result is cached here so the banner/stats can tell the truth cheaply.
+HEALTH_FILE = ERRBASE_DIR / "cloud_health.json"
+HEALTH_TTL_SECONDS = 24 * 3600
+
+
+def _write_health(ok: bool, detail: str = "") -> None:
+    try:
+        HEALTH_FILE.write_text(json.dumps({
+            "ok": bool(ok),
+            "detail": detail[:200],
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }))
+    except Exception:
+        pass
+
+
+def _read_health() -> dict:
+    try:
+        return json.loads(HEALTH_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def cloud_verified() -> bool:
+    """True only if a recent real round-trip to Cognee actually succeeded."""
+    if not cognee_available():
+        return False
+    h = _read_health()
+    if not h.get("ok"):
+        return False
+    try:
+        age = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(h["ts"])).total_seconds()
+        return age < HEALTH_TTL_SECONDS
+    except Exception:
+        return False
 
 
 def backend_name() -> str:
     if _CLOUD_OK:
-        return "Cognee Cloud"
+        return "Cognee Cloud" if cloud_verified() else "Cognee Cloud · unverified (run: errbase doctor)"
     if _COGNEE_OK:
-        return "Cognee (self-hosted, Mistral)"
+        return "Cognee (self-hosted)" if cloud_verified() else "Cognee self-hosted · unverified (run: errbase doctor)"
     return "local cache"
 
 
@@ -308,6 +350,13 @@ def _parse_cloud(resp) -> str:
 
 
 def selftest():
+    """Real Cognee round-trip; caches the honest result for the label."""
+    ok, detail = _selftest_impl()
+    _write_health(ok, detail)
+    return ok, detail
+
+
+def _selftest_impl():
     """Real Cognee round-trip: remember a marker, recall it. Returns (ok, detail)."""
     marker = "errbase selftest: the fix for ZZQ-marker-error is `run-errbase-selftest-fix`."
 
