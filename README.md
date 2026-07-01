@@ -62,7 +62,7 @@ You don't need an error to happen to use it — just type the error text and ask
 ## Turning on the graph brain (optional)
 
 errbase works out of the box on a **local cache**. To switch on the real graph
-memory ([Cognee](https://github.com/topoteretes/cognee) + Mistral), add a key.
+memory ([Cognee](https://github.com/topoteretes/cognee)), add a key.
 
 Easiest — **Cognee Cloud**. Put your key in a `.env` file next to the project:
 
@@ -78,8 +78,7 @@ errbase seed      # first real write to the cloud graph
 errbase demo
 ```
 
-> Prefer self-hosting? Set `LLM_API_KEY` + `LLM_PROVIDER=mistral` instead.
-> See `.env.example` for all options.
+> One key is all you need — Cognee Cloud runs the graph extraction for you.
 
 ---
 
@@ -99,5 +98,4 @@ without your `y`. Your secrets never leave your machine.
 
 ---
 
-Built with **Cognee** (graph memory) · **Mistral** (entity extraction) ·
-**Rich** (terminal UI).
+Built with **Cognee** (graph memory) · **Rich** (terminal UI).
