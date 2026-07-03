@@ -42,6 +42,22 @@ You don't need an error to happen to use it — just type the error text and ask
 
 ---
 
+## Memory lifecycle
+
+Under the hood, errbase is built around four operations on the graph:
+
+| stage | what it does |
+|---|---|
+| **remember** | ingest text, a URL, or a file into the graph |
+| **recall** | query it — semantic similarity + graph traversal, not exact string match |
+| **improve** | enrich the graph and re-weight fixes based on your feedback |
+| **forget** | prune entries — all of them, older than N days, or matching a class |
+
+This happens automatically as you use `fix`, `recall`, and `confirm`. The explicit
+`remember` / `improve` / `forget` commands below let you manage the graph directly.
+
+---
+
 ## Commands
 
 | command | what it does |
@@ -52,10 +68,17 @@ You don't need an error to happen to use it — just type the error text and ask
 | `errbase graph` | see the whole memory graph |
 | `errbase fix "<error>" "<cmd>"` | teach it a fix |
 | `errbase confirm "<error>" "<cmd>"` | mark a fix as worked (reinforces it) |
+| `errbase remember "<text>"` | ingest raw text into the graph |
+| `errbase remember-url "<url>"` | fetch a URL and ingest it |
+| `errbase remember-file "<path>"` | read a file and ingest it |
+| `errbase improve` | run graph enrichment (extract entities, adapt weights) |
+| `errbase cognify` | trigger explicit graph node creation |
 | `errbase seed` | load the starter community graph |
 | `errbase stats` | what errbase has learned |
 | `errbase doctor` | check the Cognee connection |
 | `errbase forget --all` | wipe memory |
+| `errbase forget --before=<days>` | delete fixes older than N days |
+| `errbase forget --class="<term>"` | delete errors matching a term |
 
 ---
 
