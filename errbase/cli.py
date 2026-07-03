@@ -119,9 +119,20 @@ def _system() -> str:
 # Pretty bits
 # ----------------------------------------------------------------------------
 # Plain ASCII art (no markup) — safe to split line-by-line for the reveal.
-LOGO_ART = r""" ___ ___ ___ ___  ___ ___ ___
-| -_|  _|  _| . || .'|_ -| -_|
-|___|_| |_| |___||__,|___|___|"""
+LOGO_ART = r"""
+ ╔═══════════════════════════════════════════════════════════════╗
+ ║                                                               ║
+ ║  ███████╗██████╗ ██████╗ ██████╗ █████╗ ███████╗███████╗      ║
+ ║  ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔════╝     ║
+ ║  █████╗  ██████╔╝██████╔╝██████╔╝███████║███████╗█████╗       ║
+ ║  ██╔══╝  ██╔══██╗██╔══██╗██╔══██╗██╔══██║╚════██║██╔══╝       ║
+ ║  ███████╗██║  ██║██║  ██║██████╔╝██║  ██║███████║███████╗     ║
+ ║  ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝     ║
+ ║                                                               ║
+ ║        Your Terminal Remembers Every Fix You Make             ║
+ ║                                                               ║
+ ╚═══════════════════════════════════════════════════════════════╝
+"""
 
 LOGO = f"[bold {ACCENT}]{LOGO_ART}[/bold {ACCENT}]"
 
@@ -131,15 +142,6 @@ def banner(animate: bool = True):
     s = brain.stats()
     verified = brain.cloud_verified()
     dot = f"[{OK}]●[/{OK}]" if verified else f"[{WARN}]●[/{WARN}]"
-
-    # Light reveal: pulse the logo lines in before the panel settles.
-    if animate and ANIMATE:
-        for ln in LOGO_ART.split("\n"):
-            console.print(Text(ln, style=f"bold {ACCENT}"), justify="left")
-            time.sleep(0.07)
-        console.print()
-        time.sleep(0.12)
-        console.clear()
 
     head = Group(
         Text.from_markup(LOGO),
@@ -194,22 +196,34 @@ def show_help():
         ("errbase graph", "See the whole memory graph at once"),
         ("errbase fix \"<error>\" \"<cmd>\"", "Teach errbase a fix manually"),
         ("errbase confirm \"<error>\" \"<cmd>\"", "Mark a fix as worked → reinforces it"),
+        ("errbase remember \"<text>\"", "Ingest raw text into knowledge graph"),
+        ("errbase remember-url \"<url>\"", "Fetch and ingest a URL"),
+        ("errbase remember-file \"<path>\"", "Read and ingest a file"),
+        ("errbase improve", "Run graph enrichment (extract entities, adapt weights)"),
+        ("errbase cognify", "Trigger explicit graph node creation"),
         ("errbase stats", "See what errbase has learned"),
         ("errbase doctor", "Verify the live Cognee integration"),
         ("errbase seed", "Load the starter community graph"),
         ("errbase forget --all", "Wipe all memory"),
+        ("errbase forget --before=<days>", "Delete fixes older than N days"),
+        ("errbase forget --class=\"<term>\"", "Delete errors matching a term"),
     ]
     for c, d in rows:
         t.add_row(c, d)
     console.print(t)
     console.print(
         Panel(
+            "[bold]Core Memory Lifecycle[/bold]\n"
+            "🧠 [bold]remember[/bold] → ingest text/URLs/files\n"
+            "🔍 [bold]recall[/bold] → query by semantic similarity + graph traversal\n"
+            "📈 [bold]improve[/bold] → enrich graph, adapt weights on feedback\n"
+            "🗑  [bold]forget[/bold] → surgically prune datasets or old entries\n\n"
             "[bold]Auto-capture[/bold] (optional): add the shell hook so errbase learns "
             "silently.\nWhen a command fails, errbase asks "
             "[bold]once[/bold] before storing — your secrets never leave your machine "
             "without a [bold]y[/bold].",
             border_style="dim", box=box.ROUNDED,
-            title="how it learns", title_align="left",
+            title="lifecycle APIs", title_align="left",
         )
     )
 
@@ -417,6 +431,91 @@ def cmd_confirm(error_text: str, fix_command: str):
     console.print(f"[{OK}]✓ reinforced.[/{OK}]")
 
 
+def cmd_remember(text: str, source: str = "user"):
+    """Ingest text into the knowledge graph."""
+    try:
+        mid = brain.remember_text(text, source)
+        console.print(
+            f"[{OK}]✓ remembered.[/{OK}] "
+            f"[dim](ID: {mid})[/dim]"
+        )
+        console.print(
+            f"[dim]→[/dim] [bold]errbase improve[/bold] [dim]to trigger enrichment[/dim]"
+        )
+    except Exception as e:
+        console.print(f"[red]✗ failed: {e}[/red]")
+
+
+def cmd_remember_url(url: str):
+    """Fetch and ingest a URL into the knowledge graph."""
+    try:
+        with console.status("[bold]fetching URL...[/bold]", spinner="dots"):
+            mid = brain.remember_url(url)
+        console.print(
+            f"[{OK}]✓ remembered URL.[/{OK}] "
+            f"[dim](ID: {mid})[/dim]"
+        )
+        console.print(
+            f"[dim]→[/dim] [bold]errbase improve[/bold] [dim]to trigger enrichment[/dim]"
+        )
+    except Exception as e:
+        console.print(f"[red]✗ failed: {e}[/red]")
+
+
+def cmd_remember_file(filepath: str):
+    """Read and ingest a file into the knowledge graph."""
+    try:
+        with console.status(f"[bold]reading {filepath}...[/bold]", spinner="dots"):
+            mid = brain.remember_file(filepath)
+        console.print(
+            f"[{OK}]✓ remembered file.[/{OK}] "
+            f"[dim](ID: {mid})[/dim]"
+        )
+        console.print(
+            f"[dim]→[/dim] [bold]errbase improve[/bold] [dim]to trigger enrichment[/dim]"
+        )
+    except Exception as e:
+        console.print(f"[red]✗ failed: {e}[/red]")
+
+
+def cmd_improve():
+    """Run graph enrichment: extract entities, adapt weights, prune stale nodes."""
+    with console.status("[bold]enriching graph...[/bold]", spinner="dots"):
+        result = brain.improve()
+    
+    if result.get("status") == "ok":
+        console.print(
+            f"[{OK}]✓ enriched.[/{OK}] {result.get('detail', '')}"
+        )
+    elif result.get("status") == "skipped":
+        console.print(
+            f"[{MUTED}]⊘ {result.get('detail', 'no backend')}[/{MUTED}]"
+        )
+    else:
+        console.print(
+            f"[red]✗ error: {result.get('detail', 'unknown')}[/red]"
+        )
+
+
+def cmd_cognify():
+    """Explicitly trigger graph node creation and enrichment."""
+    with console.status("[bold]triggering cognify...[/bold]", spinner="dots"):
+        result = brain.cognify()
+    
+    if result.get("status") == "ok":
+        console.print(
+            f"[{OK}]✓ cognify triggered.[/{OK}] {result.get('detail', '')}"
+        )
+    elif result.get("status") == "skipped":
+        console.print(
+            f"[{MUTED}]⊘ {result.get('detail', 'no backend')}[/{MUTED}]"
+        )
+    else:
+        console.print(
+            f"[red]✗ error: {result.get('detail', 'unknown')}[/red]"
+        )
+
+
 def cmd_stats():
     s = brain.stats()
     t = Table(box=box.ROUNDED, border_style=ACCENT, title="errbase · memory")
@@ -447,6 +546,7 @@ def cmd_seed():
 def cmd_doctor():
     """Verify the Cognee integration end-to-end with a real round-trip."""
     import os
+    from .cognee_brain import COGNEE_CLOUD_URL
     banner()
     t = Table(box=box.ROUNDED, border_style=ACCENT, title="errbase doctor · integration check")
     t.add_column("check", style="dim")
@@ -458,7 +558,7 @@ def cmd_doctor():
     if cloud_key:
         t.add_row("mode", f"[{OK}]Cognee Cloud[/{OK}]  [dim](simplest)[/dim]")
         t.add_row("COGNEE_API_KEY", f"[{OK}]✓ set[/{OK}]")
-        t.add_row("endpoint", f"[dim]{os.environ.get('COGNEE_API_URL','https://api.cognee.ai')}[/dim]")
+        t.add_row("endpoint", f"[dim]{COGNEE_CLOUD_URL}[/dim]")
         console.print(t)
         ready = True
     elif llm_key:
@@ -502,10 +602,51 @@ def cmd_doctor():
             border_style="red", box=box.ROUNDED, title="integration error", title_align="left"))
 
 
-def cmd_forget():
-    if Confirm.ask("[red]Wipe ALL errbase memory?[/red]", default=False):
-        brain.forget_all()
-        console.print("[dim]forgotten.[/dim]")
+def cmd_forget(args=None):
+    """Wipe memory surgically: by class, by age, or completely.
+    
+    Usage:
+        errbase forget --all                    wipe everything
+        errbase forget --class="permission"     delete by error class
+        errbase forget --before=7                delete entries older than 7 days
+    """
+    if args is None:
+        args = []
+    
+    if not args or args == ["--all"]:
+        if Confirm.ask("[red]Wipe ALL errbase memory?[/red]", default=False):
+            brain.forget_all()
+            console.print("[dim]forgotten.[/dim]")
+        return
+    
+    arg_str = " ".join(args)
+    
+    if "--before=" in arg_str:
+        try:
+            days = int(arg_str.split("--before=")[1].split()[0])
+            if Confirm.ask(f"[red]Delete all fixes older than {days} days?[/red]", default=False):
+                deleted = brain.forget_before(days)
+                console.print(f"[{OK}]✓ deleted {deleted} card(s).[/{OK}]")
+        except (ValueError, IndexError):
+            console.print(f"[{WARN}]invalid format - use: errbase forget --before=7[/{WARN}]")
+        return
+    
+    if "--class=" in arg_str:
+        try:
+            error_class = arg_str.split("--class=")[1].strip('"\'')
+            if Confirm.ask(f"[red]Delete all errors matching \"{error_class}\"?[/red]", default=False):
+                deleted = brain.forget_class(error_class)
+                console.print(f"[{OK}]✓ deleted {deleted} card(s) matching '{error_class}'.[/{OK}]")
+        except (ValueError, IndexError):
+            console.print(f"[{WARN}]invalid format - use: errbase forget --class=\"permission\"[/{WARN}]")
+        return
+    
+    console.print(
+        f"[{WARN}]unknown forget option.[/{WARN}] try:\n"
+        f"  errbase forget --all\n"
+        f"  errbase forget --before=7\n"
+        f"  errbase forget --class=\"permission\""
+    )
 
 
 def cmd_demo():
@@ -593,6 +734,16 @@ def main(argv=None):
             cmd_fix(rest[0], rest[1])
         elif cmd == "confirm" and len(rest) >= 2:
             cmd_confirm(rest[0], rest[1])
+        elif cmd == "remember" and rest:
+            cmd_remember(" ".join(rest))
+        elif cmd == "remember-url" and rest:
+            cmd_remember_url(" ".join(rest))
+        elif cmd == "remember-file" and rest:
+            cmd_remember_file(" ".join(rest))
+        elif cmd == "improve":
+            cmd_improve()
+        elif cmd == "cognify":
+            cmd_cognify()
         elif cmd == "stats":
             cmd_stats()
         elif cmd == "seed":
@@ -600,7 +751,7 @@ def main(argv=None):
         elif cmd == "demo":
             cmd_demo()
         elif cmd == "forget":
-            cmd_forget()
+            cmd_forget(rest)
         else:
             console.print(f"[{WARN}]unknown or incomplete command.[/{WARN}] try [bold]errbase help[/bold]")
     except KeyboardInterrupt:
