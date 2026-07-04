@@ -128,4 +128,42 @@ without your `y`. Your secrets never leave your machine.
 
 ---
 
-Built with **Cognee** (graph memory) · **Rich** (terminal UI).
+## Use it from an LLM agent (MCP)
+
+errbase also runs as an **MCP server**, so an agent like Claude Code can call
+`remember`/`recall`/`improve` itself — mid-session, without you typing a
+single `errbase` command. This is what actually gives the agent persistent
+memory across sessions, not just within one conversation.
+
+Add a `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "errbase": {
+      "command": "python3",
+      "args": ["-m", "errbase.mcp_server"]
+    }
+  }
+}
+```
+
+Reload the workspace, and the agent gets these tools:
+
+| tool | maps to |
+|---|---|
+| `recall_fix(error_text)` | `recall` — checked automatically before the agent diagnoses a shell error itself |
+| `remember_fix(error_text, fix_command)` | `remember` — stored only after the agent verifies the fix actually works |
+| `confirm_fix(error_text, fix_command)` | `improve` — reinforces a fix that worked again |
+| `remember_note(text)` | freeform ingestion |
+| `forget_class(error_class)` | scoped deletion |
+| `memory_stats()` | what the graph currently knows |
+
+Destructive full wipes (`forget --all` / `--before`) are intentionally **not**
+exposed to the agent — those stay human-only, typed at the CLI.
+
+Install the MCP SDK with `pip install "errbase[mcp]"`.
+
+---
+
+Built with **Cognee** (graph memory) · **Rich** (terminal UI) · **MCP** (agent integration).
