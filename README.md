@@ -10,6 +10,12 @@ back on Google re-finding the same answer.
 
 ---
 
+## Demo
+
+[▶ Watch the demo](demo.mp4)
+
+---
+
 ## Try it in 10 seconds
 
 ```bash

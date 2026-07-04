@@ -36,7 +36,7 @@ HOME = Path.home()
 ERRBASE_DIR = HOME / ".errbase"
 ERRBASE_DIR.mkdir(exist_ok=True)
 LOCAL_STORE = ERRBASE_DIR / "store.json"        # fallback + fast index
-DATASET = "errbase_v3"
+DATASET = "errbase_v7"
 
 # ──────────────────────────────────────────────────────────────────────────
 # Cognee Cloud.   export COGNEE_API_KEY="your_cognee_key"

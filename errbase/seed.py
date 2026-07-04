@@ -12,12 +12,7 @@ Keep these real and verifiable — judges may recognize them.
 # entity extraction fragments multi-command fixes into many small nodes, which
 # clutters the Mindmap graph view. One error -> one fix -> one clean edge.
 SEED_CARDS = [
-    {
-        "error": "port 8000 already in use",
-        "fix": "fuser -k 8000/tcp",
-        "system": "Linux",
-        "cmd": "uvicorn app:app",
-    },
+ 
     {
         "error": "docker daemon is not running",
         "fix": "sudo systemctl start docker",
