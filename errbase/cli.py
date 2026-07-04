@@ -2,7 +2,7 @@
 """
 errbase — your terminal remembers how you fixed it last time.
 
-Powered by Cognee (graph memory) + Mistral. Captures failed commands, stores
+Powered by Cognee Cloud (graph memory). Captures failed commands, stores
 the fix that worked in a knowledge graph, and surfaces it the next time the
 same error class appears — even on a fresh machine, via the shared error graph.
 
@@ -11,8 +11,8 @@ Usage:
     errbase recall "<error text>"      Look up a known fix for an error
     errbase capture <code> "<cmd>" "<stderr>"
                                        (called by the shell hook on failure)
-    errbase fix "<error>" "<fix cmd>"  Manually teach errbase a fix
-    errbase confirm "<error>" "<fix>"  Mark a fix as worked (reinforces it)
+    errbase remember "<error>" "<fix cmd>"  Manually teach errbase a fix
+    errbase improve "<error>" "<fix>"  Mark a fix as worked (reinforces it)
     errbase stats                      Show what errbase has learned
     errbase seed                       Load the starter community error graph
     errbase forget --all               Wipe all memory
@@ -194,11 +194,11 @@ def show_help():
         ("errbase recall \"<error>\"", "Look up the fix you used last time"),
         ("errbase why \"<error>\"", "Show the graph chain behind a fix"),
         ("errbase graph", "See the whole memory graph at once"),
-        ("errbase fix \"<error>\" \"<cmd>\"", "Teach errbase a fix manually"),
-        ("errbase confirm \"<error>\" \"<cmd>\"", "Mark a fix as worked → reinforces it"),
+        ("errbase remember \"<error>\" \"<cmd>\"", "Teach errbase a fix"),
         ("errbase remember \"<text>\"", "Ingest raw text into knowledge graph"),
         ("errbase remember-url \"<url>\"", "Fetch and ingest a URL"),
         ("errbase remember-file \"<path>\"", "Read and ingest a file"),
+        ("errbase improve \"<error>\" \"<cmd>\"", "Mark a fix as worked → reinforces it"),
         ("errbase improve", "Run graph enrichment (extract entities, adapt weights)"),
         ("errbase cognify", "Trigger explicit graph node creation"),
         ("errbase stats", "See what errbase has learned"),
@@ -316,7 +316,7 @@ def show_graph():
                         border_style=ACCENT, box=box.ROUNDED, padding=(1, 2)))
     console.print(
         f"  [{OK}]●[/{OK}] [dim]battle-tested 3×+[/dim]   "
-        f"[{WARN}]●[/{WARN}] [dim]used once[/dim]   "
+        f"[{WARN}]●[/{WARN}] [dim]used once/twice[/dim]   "
         f"[{MUTED}]●[/{MUTED}] [dim]unconfirmed[/dim]\n"
     )
 
@@ -347,7 +347,7 @@ def show_fix(result: dict, error_text: str):
         console.print(
             Panel(
                 f"[dim]No known fix yet for:[/dim]\n[bold]{error_text.strip()[:120]}[/bold]\n\n"
-                f"When you solve it, run:\n  [bold {ACCENT}]errbase fix \"{error_text.strip()[:40]}...\" "
+                f"When you solve it, run:\n  [bold {ACCENT}]errbase remember \"{error_text.strip()[:40]}...\" "
                 f"\"<your fix command>\"[/bold {ACCENT}]",
                 title="errbase · no memory",
                 border_style=WARN,
@@ -412,29 +412,31 @@ def cmd_capture(code: str, command: str, stderr: str):
     # else: stay silent on first sight — don't nag the user
 
 
-def cmd_fix(error_text: str, fix_command: str):
-    if not Confirm.ask(
-        f"[{ACCENT}]Store this fix in your error graph?[/{ACCENT}] "
-        f"[dim](nothing leaves your machine)[/dim]",
-        default=True,
-    ):
-        console.print("[dim]skipped — nothing stored.[/dim]")
+def cmd_remember(args: list):
+    """remember() — the ingest lifecycle op.
+
+    One arg: ingest freeform text/notes into the graph.
+    Two args: structured error+fix pair (what `fix` used to be) —
+    `errbase remember "<error>" "<fix command>"`.
+    """
+    if len(args) >= 2:
+        error_text, fix_command = args[0], args[1]
+        if not Confirm.ask(
+            f"[{ACCENT}]Store this fix in your error graph?[/{ACCENT}] "
+            f"[dim](nothing leaves your machine)[/dim]",
+            default=True,
+        ):
+            console.print("[dim]skipped — nothing stored.[/dim]")
+            return
+        brain.store_fix(
+            command="", error_text=error_text, fix_command=fix_command, system=_system()
+        )
+        console.print(f"[{OK}]✓ learned.[/{OK}] errbase will surface this next time.")
         return
-    brain.store_fix(
-        command="", error_text=error_text, fix_command=fix_command, system=_system()
-    )
-    console.print(f"[{OK}]✓ learned.[/{OK}] errbase will surface this next time.")
 
-
-def cmd_confirm(error_text: str, fix_command: str):
-    brain.confirm_fix(error_text, fix_command, _system())
-    console.print(f"[{OK}]✓ reinforced.[/{OK}]")
-
-
-def cmd_remember(text: str, source: str = "user"):
-    """Ingest text into the knowledge graph."""
+    text = args[0]
     try:
-        mid = brain.remember_text(text, source)
+        mid = brain.remember_text(text, "user")
         console.print(
             f"[{OK}]✓ remembered.[/{OK}] "
             f"[dim](ID: {mid})[/dim]"
@@ -478,11 +480,29 @@ def cmd_remember_file(filepath: str):
         console.print(f"[red]✗ failed: {e}[/red]")
 
 
-def cmd_improve():
-    """Run graph enrichment: extract entities, adapt weights, prune stale nodes."""
+def cmd_improve(args: list | None = None):
+    """improve() — the enrichment/feedback lifecycle op.
+
+    No args: run graph enrichment (extract entities, adapt weights, prune stale nodes).
+    Two args: confirm/reinforce a fix that worked (what `confirm` used to be) —
+    `errbase improve "<error>" "<fix command>"`.
+    """
+    args = args or []
+    if len(args) >= 2:
+        error_text, fix_command = args[0], args[1]
+        found = brain.confirm_fix(error_text, fix_command, _system())
+        if found:
+            console.print(f"[{OK}]✓ reinforced.[/{OK}]")
+        else:
+            console.print(
+                f"[{WARN}]no matching stored fix found for that error — nothing "
+                f"reinforced. Use `errbase remember` to teach it first.[/{WARN}]"
+            )
+        return
+
     with console.status("[bold]enriching graph...[/bold]", spinner="dots"):
         result = brain.improve()
-    
+
     if result.get("status") == "ok":
         console.print(
             f"[{OK}]✓ enriched.[/{OK}] {result.get('detail', '')}"
@@ -531,12 +551,17 @@ def cmd_stats():
 def cmd_seed():
     with console.status("[bold]seeding community error graph...[/bold]", spinner="dots"):
         for card in SEED_CARDS:
+            # cognify=False: add everything first, cognify once at the end.
+            # 50 back-to-back blocking cognify calls has been observed to
+            # overload/error out Cognee Cloud's pipeline.
             brain.store_fix(
                 command=card.get("cmd", ""),
                 error_text=card["error"],
                 fix_command=card["fix"],
                 system=card.get("system", "Linux"),
+                cognify=False,
             )
+        brain.improve()  # blocking cognify — ensures the graph is indexed before any recall
     console.print(
         f"[{OK}]✓ seeded {len(SEED_CARDS)} common fixes[/{OK}] "
         f"[dim](Arch/Nix/CachyOS/git/docker).[/dim]"
@@ -553,7 +578,6 @@ def cmd_doctor():
     t.add_column("result")
 
     cloud_key = os.environ.get("COGNEE_API_KEY")
-    llm_key = os.environ.get("LLM_API_KEY")
 
     if cloud_key:
         t.add_row("mode", f"[{OK}]Cognee Cloud[/{OK}]  [dim](simplest)[/dim]")
@@ -561,20 +585,6 @@ def cmd_doctor():
         t.add_row("endpoint", f"[dim]{COGNEE_CLOUD_URL}[/dim]")
         console.print(t)
         ready = True
-    elif llm_key:
-        try:
-            import cognee
-            ver = getattr(cognee, "__version__", "?")
-            t.add_row("mode", "[bold]self-hosted[/bold]")
-            t.add_row("cognee installed", f"[{OK}]✓ v{ver}[/{OK}]")
-            t.add_row("LLM_API_KEY", f"[{OK}]✓ set[/{OK}]")
-            t.add_row("LLM_PROVIDER", f"[dim]{os.environ.get('LLM_PROVIDER','(unset)')}[/dim]")
-            console.print(t)
-            ready = True
-        except Exception as e:
-            t.add_row("cognee installed", f"[red]✗ {e}[/red]")
-            console.print(t)
-            ready = False
     else:
         t.add_row("mode", f"[{WARN}]local cache only[/{WARN}]")
         console.print(t)
@@ -615,8 +625,15 @@ def cmd_forget(args=None):
     
     if not args or args == ["--all"]:
         if Confirm.ask("[red]Wipe ALL errbase memory?[/red]", default=False):
-            brain.forget_all()
-            console.print("[dim]forgotten.[/dim]")
+            cloud_ok = brain.forget_all()
+            if cloud_ok:
+                console.print("[dim]forgotten.[/dim]")
+            else:
+                console.print(
+                    f"[{WARN}]local memory wiped, but the Cognee Cloud dataset delete "
+                    f"failed — it may still hold old data. Re-run `errbase forget --all` "
+                    f"or clear it from platform.cognee.ai.[/{WARN}]"
+                )
         return
     
     arg_str = " ".join(args)
@@ -731,17 +748,19 @@ def main(argv=None):
         elif cmd == "capture" and len(rest) >= 3:
             cmd_capture(rest[0], rest[1], rest[2])
         elif cmd == "fix" and len(rest) >= 2:
-            cmd_fix(rest[0], rest[1])
+            # backward-compat alias for `remember <error> <fix>`
+            cmd_remember([rest[0], rest[1]])
         elif cmd == "confirm" and len(rest) >= 2:
-            cmd_confirm(rest[0], rest[1])
+            # backward-compat alias for `improve <error> <fix>`
+            cmd_improve([rest[0], rest[1]])
         elif cmd == "remember" and rest:
-            cmd_remember(" ".join(rest))
+            cmd_remember(rest)
         elif cmd == "remember-url" and rest:
             cmd_remember_url(" ".join(rest))
         elif cmd == "remember-file" and rest:
             cmd_remember_file(" ".join(rest))
         elif cmd == "improve":
-            cmd_improve()
+            cmd_improve(rest)
         elif cmd == "cognify":
             cmd_cognify()
         elif cmd == "stats":

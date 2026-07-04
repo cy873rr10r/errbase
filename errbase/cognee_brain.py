@@ -15,7 +15,7 @@ Design choices for a hackathon:
 
 import os
 import json
-import asyncio
+import uuid
 import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
@@ -36,19 +36,12 @@ HOME = Path.home()
 ERRBASE_DIR = HOME / ".errbase"
 ERRBASE_DIR.mkdir(exist_ok=True)
 LOCAL_STORE = ERRBASE_DIR / "store.json"        # fallback + fast index
-DATASET = "errbase"
+DATASET = "errbase_v3"
 
 # ──────────────────────────────────────────────────────────────────────────
-# Cognee backend. TWO ways to turn it on — pick one:
-#
-#   (A) Cognee Cloud  [SIMPLEST]   export COGNEE_API_KEY="your_cognee_key"
-#       Pure HTTP to api.cognee.ai. No local DB, no setup. Recommended.
-#
-#   (B) Self-hosted   export LLM_API_KEY="your_mistral_key"
-#                     export LLM_PROVIDER="mistral"
-#       Runs the cognee library locally with your own LLM.
-#
-# If neither is set, errbase runs on its local graph cache (still fully works).
+# Cognee Cloud.   export COGNEE_API_KEY="your_cognee_key"
+# Pure HTTP to api.cognee.ai (or your tenant's dedicated endpoint). No local
+# DB, no setup. If not set, errbase runs on its local graph cache only.
 # ──────────────────────────────────────────────────────────────────────────
 COGNEE_API_KEY = os.environ.get("COGNEE_API_KEY")
 COGNEE_TENANT_ID = os.environ.get("COGNEE_TENANT_ID")
@@ -60,23 +53,11 @@ if not COGNEE_CLOUD_URL:
     COGNEE_CLOUD_URL = "https://api.cognee.ai"
 
 _CLOUD_OK = bool(COGNEE_API_KEY)
-_COGNEE_OK = False  # self-hosted library path
-
-if not _CLOUD_OK and os.environ.get("LLM_API_KEY"):
-    os.environ.setdefault("LITELLM_LOG", "ERROR")
-    import logging as _logging
-    _logging.getLogger("cognee").setLevel(_logging.ERROR)
-    _logging.getLogger("LiteLLM").setLevel(_logging.ERROR)
-    try:
-        import cognee  # noqa
-        _COGNEE_OK = True
-    except Exception:
-        _COGNEE_OK = False
 
 
 def cognee_available() -> bool:
-    """A cloud key / self-hosted lib is configured (we'll attempt to use it)."""
-    return _CLOUD_OK or _COGNEE_OK
+    """A Cognee Cloud key is configured (we'll attempt to use it)."""
+    return _CLOUD_OK
 
 
 # ── Honest health cache ────────────────────────────────────────────────────
@@ -123,74 +104,149 @@ def cloud_verified() -> bool:
 def backend_name() -> str:
     if _CLOUD_OK:
         return "Cognee Cloud" if cloud_verified() else "Cognee Cloud · unverified (run: errbase doctor)"
-    if _COGNEE_OK:
-        return "Cognee (self-hosted)" if cloud_verified() else "Cognee self-hosted · unverified (run: errbase doctor)"
     return "local cache"
 
 
 # ── Cognee Cloud HTTP client (stdlib only — no extra deps) ─────────────────
-def _cloud_post(path: str, payload: dict, timeout: int = 60):
-    import urllib.request
-    import urllib.error
-    headers = {
-        "Content-Type": "application/json",
-        "X-Api-Key": COGNEE_API_KEY
-    }
-    # Add tenant ID if using tenant-specific endpoint
+# Endpoints/payloads below were verified directly against the live API —
+# the docs' Python SDK names (remember/recall/improve) don't map 1:1 onto
+# the REST paths (add/cognify/search), and several fields are camelCase.
+def _cloud_headers(extra: dict | None = None) -> dict:
+    headers = {"X-Api-Key": COGNEE_API_KEY}
     if COGNEE_TENANT_ID:
         headers["X-Tenant-Id"] = COGNEE_TENANT_ID
-    
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _cloud_request(method: str, path: str, data: bytes | None = None,
+                    headers: dict | None = None, timeout: int = 60):
+    import urllib.request
+    import urllib.error
     req = urllib.request.Request(
-        f"{COGNEE_CLOUD_URL}{path}",
-        data=json.dumps(payload).encode(),
-        headers=headers,
-        method="POST",
+        f"{COGNEE_CLOUD_URL}{path}", data=data,
+        headers=_cloud_headers(headers), method=method,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+            body = r.read().decode()
+            return json.loads(body) if body else None
     except urllib.error.HTTPError as e:
-        # Try to extract error details from response body
         try:
             error_body = json.loads(e.read().decode())
-            error_msg = error_body.get("error", str(e))
+            error_msg = error_body.get("detail", error_body.get("error", str(e)))
         except Exception:
             error_msg = str(e)
         raise RuntimeError(f"API error {e.code} at {path}: {error_msg}") from e
 
 
+def _cloud_post(path: str, payload: dict, timeout: int = 60):
+    return _cloud_request(
+        "POST", path, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"}, timeout=timeout,
+    )
 
-def _cloud_remember(text: str):
-    """Store text in Cognee cloud. Falls back to local store on error."""
+
+def _cloud_remember(text: str, filename: str = "memory.txt"):
+    """Store text in Cognee cloud via multipart /add (it's a file-upload
+    endpoint, not JSON — sending JSON silently fails validation).
+    Returns (dataset_id, data_id), or (None, None) on failure.
+    """
+    boundary = uuid.uuid4().hex
+    body = bytearray()
+    body += (f'--{boundary}\r\nContent-Disposition: form-data; name="datasetName"'
+              f'\r\n\r\n{DATASET}\r\n').encode()
+    body += (f'--{boundary}\r\nContent-Disposition: form-data; name="data"; '
+              f'filename="{filename}"\r\nContent-Type: text/plain\r\n\r\n').encode()
+    body += text.encode() + b"\r\n"
+    body += f'--{boundary}--\r\n'.encode()
     try:
-        # Try the add endpoint
-        # Note: There's a validation bug in Cognee's add endpoint, but recall works fine
-        _cloud_post("/api/v1/add", {"data": text, "datasetName": DATASET})
-    except Exception as e:
-        # If cloud fails, that's OK - local store will handle it
-        # This is intentional: we want the app to work offline
-        pass
+        resp = _cloud_request(
+            "POST", "/api/v1/add", data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        dataset_id = resp.get("dataset_id") if resp else None
+        info = (resp.get("data_ingestion_info") or []) if resp else []
+        data_id = info[0].get("data_id") if info else None
+        return dataset_id, data_id
+    except Exception:
+        return None, None
 
 
-def _cloud_cognify():
-    """Trigger graph enrichment in Cognee cloud (optional)."""
+def _cloud_cognify(block: bool = True):
+    """Trigger graph enrichment in Cognee cloud. Blocks by default so a
+    recall() right after is guaranteed to see the new data."""
     try:
-        _cloud_post("/api/v1/cognify", {"datasetName": DATASET})
+        _cloud_post("/api/v1/cognify", {"datasets": [DATASET], "run_in_background": not block})
     except Exception:
         pass  # Optional operation; failures don't break recall
 
 
 def _cloud_recall(query: str):
-    """Query Cognee cloud graph. Verified working endpoint."""
+    """Query Cognee cloud graph via /api/v1/search (the SDK's recall() maps
+    to this REST path, not /api/v1/recall — that path doesn't exist)."""
     try:
-        # This endpoint is verified working with proper X-Tenant-Id header
-        return _cloud_post("/api/v1/recall", {
-            "queryText": query,
-            "datasetNames": [DATASET],
+        return _cloud_post("/api/v1/search", {
+            "searchType": "GRAPH_COMPLETION",
+            "query": query,
+            "datasets": [DATASET],
+            "topK": 5,
         })
-    except Exception as e:
-        # Fall back to local search on cloud failure
+    except Exception:
         return None
+
+
+_dataset_id_cache: dict[str, str] = {}
+
+
+def _cloud_dataset_id() -> str | None:
+    """Resolve the errbase dataset's UUID (needed for delete calls)."""
+    if DATASET in _dataset_id_cache:
+        return _dataset_id_cache[DATASET]
+    try:
+        datasets = _cloud_request("GET", "/api/v1/datasets") or []
+        for d in datasets:
+            if d.get("name") == DATASET:
+                _dataset_id_cache[DATASET] = d["id"]
+                return d["id"]
+    except Exception:
+        pass
+    return None
+
+
+def _cloud_delete_dataset() -> bool:
+    """Delete the whole errbase dataset from Cognee Cloud.
+
+    One retry on failure: observed intermittent 500s from the Cloud API on
+    datasets that have been rapidly recreated (delete -> add -> delete...),
+    which succeed on a second attempt.
+    """
+    ds_id = _cloud_dataset_id()
+    if not ds_id:
+        return False
+    import time
+    for attempt in range(2):
+        try:
+            _cloud_request("DELETE", f"/api/v1/datasets/{ds_id}")
+            _dataset_id_cache.pop(DATASET, None)
+            return True
+        except Exception:
+            if attempt == 0:
+                time.sleep(1.5)
+    return False
+
+
+def _cloud_delete_data(data_id: str) -> bool:
+    """Delete a single data item from the errbase dataset."""
+    ds_id = _cloud_dataset_id()
+    if not ds_id or not data_id:
+        return False
+    try:
+        _cloud_request("DELETE", f"/api/v1/datasets/{ds_id}/data/{data_id}")
+        return True
+    except Exception:
+        return False
 
 
 # ----------------------------------------------------------------------------
@@ -214,81 +270,18 @@ def _card_id(error_text: str) -> str:
 
 
 # ----------------------------------------------------------------------------
-# Async Cognee calls, run synchronously from the CLI.
-# Signatures verified against cognee 1.2.x:
-#   remember(data, dataset_name="...")        -> RememberResult
-#   recall(query_text, query_type=..., top_k) -> list[Response*Entry]
-#   improve(dataset="...")                    -> enrichment / weight adaptation
-#   forget(everything=True | dataset="...")   -> dict   (keyword-only!)
-# ----------------------------------------------------------------------------
-def _run(coro):
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    # already inside a loop (rare in CLI) — run in a fresh one
-    return asyncio.run_coroutine_threadsafe(coro, loop).result()
-
-
-async def _cognee_remember(text: str):
-    import cognee
-    return await cognee.remember(text, dataset_name=DATASET)
-
-
-async def _cognee_recall(query: str):
-    import cognee
-    from cognee.modules.search.types import SearchType
-    # GRAPH_COMPLETION: natural-language answer grounded in graph traversal.
-    return await cognee.recall(
-        query, query_type=SearchType.GRAPH_COMPLETION, top_k=5, datasets=[DATASET]
-    )
-
-
-async def _cognee_improve():
-    import cognee
-    return await cognee.improve(dataset=DATASET)
-
-
-async def _cognee_cognify():
-    import cognee
-    return await cognee.cognify(dataset=DATASET)
-
-
-async def _cognee_forget_all():
-    import cognee
-    try:
-        return await cognee.forget(dataset=DATASET)
-    except Exception:
-        return await cognee.forget(everything=True)
-
-
-def _parse_recall(results) -> str:
-    """Cognee recall returns structured entries (Pydantic), not strings.
-    Pull the best human-readable answer text out, defensively."""
-    if not results:
-        return ""
-    first = results[0] if isinstance(results, (list, tuple)) else results
-    # entries expose differing attrs across response types; try the common ones
-    for attr in ("answer", "text", "content", "context", "result"):
-        val = getattr(first, attr, None)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-    # pydantic model? dump and grab first string field
-    try:
-        d = first.model_dump() if hasattr(first, "model_dump") else dict(first)
-        for v in d.values():
-            if isinstance(v, str) and len(v) > 3:
-                return v.strip()
-    except Exception:
-        pass
-    return str(first)
-
-
-# ----------------------------------------------------------------------------
 # Public API used by the CLI
 # ----------------------------------------------------------------------------
-def store_fix(command: str, error_text: str, fix_command: str, system: str) -> str:
-    """Permanently remember an error and the fix that resolved it."""
+def store_fix(command: str, error_text: str, fix_command: str, system: str,
+              cognify: bool = True) -> str:
+    """Permanently remember an error and the fix that resolved it.
+
+    cognify=False skips the blocking re-index after this one add — use for
+    bulk loads (seed) where 50 back-to-back blocking cognify calls have been
+    observed to overload/error out Cognee Cloud's pipeline. Callers doing
+    bulk inserts should add everything, then call cognee_brain.cognify()
+    once at the end.
+    """
     cid = _card_id(error_text)
     data = _load_local()
     card = data["cards"].get(cid, {
@@ -319,12 +312,15 @@ def store_fix(command: str, error_text: str, fix_command: str, system: str) -> s
     )
     if _CLOUD_OK:
         try:
-            _cloud_remember(memory_text)
-        except Exception:
-            pass
-    elif _COGNEE_OK:
-        try:
-            _run(_cognee_remember(memory_text))
+            _, data_id = _cloud_remember(memory_text)
+            if data_id:
+                # track the cloud data_id so forget_before/forget_class can
+                # actually delete this entry from Cognee's graph, not just local cache
+                data = _load_local()
+                data["cards"][cid].setdefault("cloud_data_ids", []).append(data_id)
+                _save_local(data)
+            if cognify:
+                _cloud_cognify(block=True)
         except Exception:
             pass
     return cid
@@ -341,6 +337,22 @@ def recall_fix(error_text: str):
     """
     cognee_first = os.environ.get("ERRBASE_COGNEE_FIRST") == "1"
 
+    def _tombstoned() -> bool:
+        # Cognee Cloud's per-item delete removes the source record but does not
+        # retroactively prune nodes already extracted into the graph (verified:
+        # delete + re-cognify still answers from the deleted entry). Without this
+        # check, forget_before/forget_class would appear to work, then the exact
+        # same error would silently resurface from stale cloud data on next recall.
+        data = _load_local()
+        tombstones = data.get("tombstones", {})
+        if _card_id(error_text) in tombstones:
+            return True
+        return any(
+            _tokens(error_text) & _tokens(t["error"])
+            and len(_tokens(error_text) & _tokens(t["error"])) / max(1, len(_tokens(error_text) | _tokens(t["error"]))) >= 0.5
+            for t in tombstones.values()
+        )
+
     def _local():
         data = _load_local()
         card = data["cards"].get(_card_id(error_text)) or _fuzzy_local(error_text, data)
@@ -356,26 +368,15 @@ def recall_fix(error_text: str):
         return None
 
     def _cognee():
+        if _tombstoned():
+            return None
         q = f"What exact shell command fixes this terminal error: {error_text.strip()}"
-        # Cloud path (HTTP)
         if _CLOUD_OK:
             try:
                 resp = _cloud_recall(q)
                 answer = _parse_cloud(resp)
                 if answer:
                     return {"source": "cognee-cloud", "error": error_text.strip(),
-                            "fix": _extract_command(answer), "confirms": 0,
-                            "others": [], "raw": answer}
-            except Exception:
-                return None
-            return None
-        # Self-hosted library path
-        if _COGNEE_OK:
-            try:
-                results = _run(_cognee_recall(q))
-                answer = _parse_recall(results)
-                if answer:
-                    return {"source": "cognee-graph", "error": error_text.strip(),
                             "fix": _extract_command(answer), "confirms": 0,
                             "others": [], "raw": answer}
             except Exception:
@@ -387,22 +388,40 @@ def recall_fix(error_text: str):
     return _local() or _cognee()
 
 
+# Cognee's GRAPH_COMPLETION answers sometimes render plain ASCII hyphens as
+# typographic Unicode dash variants (observed: U+2011 non-breaking hyphen).
+# Left un-normalized, this silently breaks exact-match checks and produces
+# fix commands that look right but fail to run (different byte, same glyph).
+_DASH_VARIANTS = "‐‑‒–—―−"
+
+
+def _normalize_dashes(text: str) -> str:
+    for ch in _DASH_VARIANTS:
+        text = text.replace(ch, "-")
+    return text
+
+
 def _parse_cloud(resp) -> str:
-    """Cognee Cloud /search returns JSON. Pull the answer text out defensively."""
+    """Cognee Cloud /search returns [{dataset_name, search_result: [...]}, ...].
+    Pull the first answer string out, defensively."""
     if resp is None:
         return ""
     if isinstance(resp, str):
-        return resp.strip()
+        return _normalize_dashes(resp.strip())
     if isinstance(resp, list):
-        return _parse_cloud(resp[0]) if resp else ""
+        for entry in resp:
+            text = _parse_cloud(entry)
+            if text:
+                return text
+        return ""
     if isinstance(resp, dict):
-        for k in ("result", "answer", "text", "content", "search_result", "results"):
+        for k in ("search_result", "result", "answer", "text", "content", "results"):
             v = resp.get(k)
             if isinstance(v, str) and v.strip():
-                return v.strip()
+                return _normalize_dashes(v.strip())
             if isinstance(v, list) and v:
                 return _parse_cloud(v[0])
-    return str(resp)
+    return str(resp).strip()
 
 
 def selftest():
@@ -413,45 +432,38 @@ def selftest():
 
 
 def _selftest_impl():
-    """Real Cognee round-trip: remember a marker, recall it. Returns (ok, detail)."""
-    marker = "errbase selftest: the fix for ZZQ-marker-error is `run-errbase-selftest-fix`."
+    """Real Cognee round-trip: remember a marker, recall it. Returns (ok, detail).
+
+    Uses a fresh unique marker each run and checks the recall answer actually
+    contains the fix — a prior version declared "LIVE" as long as recall
+    returned *any* text, even unrelated content already in the graph.
+    """
+    marker_id = f"ZZQ-{uuid.uuid4().hex[:8]}"
+    marker_fix = f"run-errbase-selftest-{uuid.uuid4().hex[:6]}"
+    marker = f"errbase selftest: the fix for {marker_id} is `{marker_fix}`."
 
     # Cloud path
     if _CLOUD_OK:
         try:
-            _cloud_remember(marker)
+            _, data_id = _cloud_remember(marker)
+            if not data_id:
+                return False, "Cloud /add did not return a data_id — ingestion likely failed."
         except Exception as e:
             return False, f"Cloud /add failed: {type(e).__name__}: {str(e)[:160]}"
         try:
-            resp = _cloud_recall("What fixes ZZQ-marker-error?")
+            _cloud_cognify(block=True)
+        except Exception as e:
+            return False, f"Cloud /cognify failed: {type(e).__name__}: {str(e)[:160]}"
+        try:
+            resp = _cloud_recall(f"What fixes {marker_id}?")
             answer = _parse_cloud(resp)
         except Exception as e:
             return False, f"Cloud /search failed: {type(e).__name__}: {str(e)[:160]}"
-        return True, f"Cognee Cloud reachable. recall returned: {answer[:120] or '(indexing)'}"
+        if marker_fix in answer:
+            return True, f"Cognee Cloud round-trip verified. recall correctly returned: {answer[:120]}"
+        return False, f"Cloud round-trip ran but recall didn't return the expected fix. Got: {answer[:160] or '(empty)'}"
 
-    if not _COGNEE_OK:
-        return False, "No Cognee backend (set COGNEE_API_KEY for Cloud, or LLM_API_KEY for self-hosted)."
-    try:
-        _run(_cognee_remember(marker))
-    except Exception as e:
-        msg = f"{type(e).__name__}: {e}"
-        if "migration" in str(e).lower() or "id schemes" in str(e).lower():
-            return False, ("remember() hit a half-initialized Cognee store "
-                           "(MigrationError). Fix: `rm -rf ~/.cognee` then re-run "
-                           "`errbase doctor`. (First-run DB setup needs network access.)")
-        if "403" in str(e) or "ladybug" in str(e).lower() or "extension" in str(e).lower():
-            return False, ("Cognee's embedded DB couldn't download its extension "
-                           "(network blocked). Allow extension.ladybugdb.com, or set "
-                           "GRAPH_DATABASE_PROVIDER=networkx, then retry.")
-        return False, f"remember() failed: {msg}"
-    try:
-        results = _run(_cognee_recall("What fixes ZZQ-marker-error?"))
-        answer = _parse_recall(results)
-    except Exception as e:
-        return False, f"recall() failed: {type(e).__name__}: {e}"
-    if answer:
-        return True, f"remember() + recall() both returned. recall said: {answer[:120]}"
-    return True, "remember() + recall() ran (empty answer — graph may still be indexing)."
+    return False, "No Cognee backend configured (set COGNEE_API_KEY)."
 
 
 def all_cards() -> list:
@@ -459,19 +471,37 @@ def all_cards() -> list:
     return list(_load_local().get("cards", {}).values())
 
 
-def confirm_fix(error_text: str, fix_command: str, system: str) -> None:
-    """User verified the fix worked — reinforce it (improve/memify)."""
+def confirm_fix(error_text: str, fix_command: str, system: str) -> bool:
+    """User verified the fix worked — reinforce it (improve/memify).
+
+    Returns whether a matching card was actually found and reinforced.
+
+    Card lookup falls back to fuzzy matching (same as recall_fix) if the
+    exact error_text hash misses — callers, especially LLM agents, don't
+    always reproduce identical wording between the recall_fix call and a
+    later confirm_fix call, and an exact-hash-only lookup would silently
+    find nothing in that case. Fix-text matching falls back to the sole
+    stored fix (or best token-overlap match among several) for the same
+    reason: callers don't always reproduce the exact stored string verbatim.
+    """
     cid = _card_id(error_text)
     data = _load_local()
-    card = data["cards"].get(cid)
-    if card:
-        f = next((x for x in card["fixes"] if x["command"] == fix_command), None)
-        if f:
-            f["confirms"] += 1
-            card["fixes"].sort(key=lambda x: x["confirms"], reverse=True)
-            _save_local(data)
+    card = data["cards"].get(cid) or _fuzzy_local(error_text, data)
+    if not card or not card["fixes"]:
+        return False
+    f = next((x for x in card["fixes"] if x["command"] == fix_command), None)
+    if not f:
+        if len(card["fixes"]) == 1:
+            f = card["fixes"][0]
+        else:
+            q = _tokens(fix_command)
+            f = max(card["fixes"], key=lambda x: len(q & _tokens(x["command"])))
+    f["confirms"] += 1
+    card["fixes"].sort(key=lambda x: x["confirms"], reverse=True)
+    _save_local(data)
     # Call improve() to adapt weights in the graph based on user feedback
     improve()
+    return True
 
 
 def remember_text(text: str, source: str = "user input") -> str:
@@ -485,13 +515,7 @@ def remember_text(text: str, source: str = "user input") -> str:
     if _CLOUD_OK:
         try:
             _cloud_remember(memory_text)
-            cognify()  # Trigger enrichment after remember
-        except Exception:
-            pass
-    elif _COGNEE_OK:
-        try:
-            _run(_cognee_remember(memory_text))
-            cognify()
+            _cloud_cognify(block=True)  # block so it's recallable immediately
         except Exception:
             pass
     return memory_id
@@ -534,22 +558,19 @@ def remember_file(filepath: str) -> str:
 
 def improve() -> dict:
     """Run post-ingestion enrichment: extract entities, prune stale nodes, adapt weights.
-    
-    This is called automatically after remember() and on confirm_fix().
-    Returns enrichment summary or empty dict if backend unavailable.
+
+    This is called automatically after remember() and on confirm_fix(). Cognee
+    Cloud (this tenant) doesn't expose a separate memify/feedback endpoint —
+    /api/v1/memify and /api/v1/feedback both 404 — so this re-runs cognify(),
+    blocking, so the reinforced "confirmed N time(s)" text is re-indexed
+    before the next recall.
     """
     result = {"status": "skipped", "detail": "local cache only"}
-    
+
     if _CLOUD_OK:
         try:
-            _cloud_cognify()
-            result = {"status": "ok", "detail": "Cognee Cloud cognify queued"}
-        except Exception as e:
-            result = {"status": "error", "detail": str(e)[:200]}
-    elif _COGNEE_OK:
-        try:
-            _run(_cognee_improve())
-            result = {"status": "ok", "detail": "Cognee improve() completed"}
+            _cloud_cognify(block=True)
+            result = {"status": "ok", "detail": "Cognee Cloud graph re-indexed"}
         except Exception as e:
             result = {"status": "error", "detail": str(e)[:200]}
     return result
@@ -557,21 +578,15 @@ def improve() -> dict:
 
 def cognify() -> dict:
     """Explicitly trigger graph enrichment (entity extraction, node creation).
-    
+
     Returns status dict.
     """
     result = {"status": "skipped", "detail": "local cache only"}
-    
+
     if _CLOUD_OK:
         try:
-            _cloud_cognify()
+            _cloud_cognify(block=False)
             result = {"status": "ok", "detail": "Cognee Cloud cognify queued (runs in background)"}
-        except Exception as e:
-            result = {"status": "error", "detail": str(e)[:200]}
-    elif _COGNEE_OK:
-        try:
-            _run(_cognee_cognify())
-            result = {"status": "ok", "detail": "Cognee cognify() completed"}
         except Exception as e:
             result = {"status": "error", "detail": str(e)[:200]}
     return result
@@ -588,18 +603,23 @@ def forget_before(days: int) -> int:
     cutoff = datetime.now(timezone.utc)
     cutoff = cutoff.replace(microsecond=0)
     cutoff = cutoff.fromtimestamp(cutoff.timestamp() - days * 86400)
-    
+
     data = _load_local()
     deleted = []
+    tombstones = data.setdefault("tombstones", {})
     for cid, card in list(data["cards"].items()):
         try:
             created = datetime.fromisoformat(card.get("created", ""))
             if created < cutoff:
                 deleted.append(cid)
+                if _CLOUD_OK:
+                    for data_id in card.get("cloud_data_ids", []):
+                        _cloud_delete_data(data_id)
+                    tombstones[cid] = {"error": card["error"], "ts": datetime.now(timezone.utc).isoformat()}
                 del data["cards"][cid]
         except Exception:
             pass
-    
+
     if deleted:
         _save_local(data)
     return len(deleted)
@@ -607,29 +627,37 @@ def forget_before(days: int) -> int:
 
 def forget_class(error_class: str) -> int:
     """Surgically delete all fixes matching an error class.
-    
+
     Example: forget_class("permission") deletes all permission-related errors.
     Returns number of cards deleted.
     """
     data = _load_local()
     deleted = []
+    tombstones = data.setdefault("tombstones", {})
     for cid, card in list(data["cards"].items()):
         if error_class.lower() in card.get("error", "").lower():
             deleted.append(cid)
+            if _CLOUD_OK:
+                for data_id in card.get("cloud_data_ids", []):
+                    _cloud_delete_data(data_id)
+                tombstones[cid] = {"error": card["error"], "ts": datetime.now(timezone.utc).isoformat()}
             del data["cards"][cid]
-    
+
     if deleted:
         _save_local(data)
     return len(deleted)
 
 
-def forget_all() -> None:
+def forget_all() -> bool:
+    """Wipe local cache and the Cognee dataset. Returns whether the cloud
+    side actually confirmed deletion (local cache is always cleared either way)."""
     _save_local({"cards": {}})
-    if _COGNEE_OK:
+    if _CLOUD_OK:
         try:
-            _run(_cognee_forget_all())
+            return _cloud_delete_dataset()
         except Exception:
-            pass
+            return False
+    return True
 
 
 def get_card(error_text: str):
@@ -690,7 +718,23 @@ def _fuzzy_local(error_text: str, data: dict):
 
 
 def _extract_command(text: str) -> str:
-    """Pull a backticked command out of a Cognee NL answer, else return text."""
+    """Pull a command out of a Cognee NL answer, else return text.
+
+    Cognee's GRAPH_COMPLETION answers use either a fenced code block
+    (```bash\ncmd\n```) or a single-backtick inline span (`cmd`) — handle
+    both, fenced first since a naive single-backtick split mangles it
+    (each ``` contains 3 backtick chars).
+    """
+    if "```" in text:
+        parts = text.split("```")
+        if len(parts) >= 2:
+            block = parts[1]
+            lines = [ln for ln in block.strip().splitlines() if ln.strip()]
+            # first line may just be a language tag (e.g. "bash")
+            if lines and lines[0].strip().isalpha() and len(lines) > 1:
+                lines = lines[1:]
+            if lines:
+                return lines[0].strip()
     if "`" in text:
         parts = text.split("`")
         if len(parts) >= 2:

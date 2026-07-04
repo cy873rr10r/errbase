@@ -27,7 +27,7 @@ No setup, no API key needed.
 ```
    you teach it a fix          you ask about an error        you confirm it worked
    ──────────────────  ──►   ─────────────────────────  ──►  ─────────────────────
-   errbase fix ...            errbase recall "..."            errbase confirm ...
+   errbase remember ...       errbase recall "..."            errbase improve ...
    stored in the graph        matched by *meaning*, not       fix ranks higher
                               exact text                       next time
 ```
@@ -53,8 +53,9 @@ Under the hood, errbase is built around four operations on the graph:
 | **improve** | enrich the graph and re-weight fixes based on your feedback |
 | **forget** | prune entries — all of them, older than N days, or matching a class |
 
-This happens automatically as you use `fix`, `recall`, and `confirm`. The explicit
-`remember` / `improve` / `forget` commands below let you manage the graph directly.
+`remember` / `recall` / `improve` / `forget` map directly onto Cognee's own
+memory lifecycle API — errbase is a domain-specific CLI over exactly those
+four operations.
 
 ---
 
@@ -66,8 +67,8 @@ This happens automatically as you use `fix`, `recall`, and `confirm`. The explic
 | `errbase recall "<error>"` | look up the fix you used last time |
 | `errbase why "<error>"` | show the graph chain behind a fix |
 | `errbase graph` | see the whole memory graph |
-| `errbase fix "<error>" "<cmd>"` | teach it a fix |
-| `errbase confirm "<error>" "<cmd>"` | mark a fix as worked (reinforces it) |
+| `errbase remember "<error>" "<cmd>"` | teach it a fix |
+| `errbase improve "<error>" "<cmd>"` | mark a fix as worked (reinforces it) |
 | `errbase remember "<text>"` | ingest raw text into the graph |
 | `errbase remember-url "<url>"` | fetch a URL and ingest it |
 | `errbase remember-file "<path>"` | read a file and ingest it |
@@ -85,9 +86,9 @@ This happens automatically as you use `fix`, `recall`, and `confirm`. The explic
 ## Turning on the graph brain (optional)
 
 errbase works out of the box on a **local cache**. To switch on the real graph
-memory ([Cognee](https://github.com/topoteretes/cognee)), add a key.
+memory ([Cognee Cloud](https://platform.cognee.ai)), add a key.
 
-Easiest — **Cognee Cloud**. Put your key in a `.env` file next to the project:
+Put your key in a `.env` file next to the project:
 
 ```
 COGNEE_API_KEY="your_key_from_platform.cognee.ai"

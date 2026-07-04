@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "errbase": {
+      "command": "python3",
+      "args": ["-m", "errbase.mcp_server"]
+    }
+  }
+}

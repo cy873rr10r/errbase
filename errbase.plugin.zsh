@@ -51,7 +51,7 @@ __errbase_precmd() {
         read -k 1 reply
         echo
         if [[ "$reply" == "y" || "$reply" == "Y" ]]; then
-          "$ERRBASE_CMD" fix "$__errbase_last_err" "$__errbase_last_cmd" 2>/dev/null
+          "$ERRBASE_CMD" remember "$__errbase_last_err" "$__errbase_last_cmd" 2>/dev/null
         fi
         ;;
     esac
